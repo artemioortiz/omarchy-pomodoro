@@ -54,6 +54,13 @@ test("focusEntry rounds minutes and normalizes fields", () => {
   assert.equal(Pomo.focusEntry(0, 0, 0, 0, "weird", "", "").outcome, "done")
 })
 
+test("doneEntry keeps a clean task id and subject", () => {
+  assert.deepEqual(Pomo.doneEntry(1234.4, " D340 ch.4 ", "6hr3xWqPh8pF9JV2"), {
+    kind: "done", at: 1234, subject: "D340 ch.4", taskId: "6hr3xWqPh8pF9JV2"
+  })
+  assert.equal(Pomo.doneEntry(0, "", "bad id!").taskId, "")
+})
+
 test("playersToPause skips proxies, idle and uncontrollable players", () => {
   const players = [
     { dbusName: "org.mpris.MediaPlayer2.playerctld", isPlaying: true, canPause: true },

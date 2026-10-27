@@ -2,17 +2,20 @@
 """Focus-block history for the pomodoro plugin.
 
   pomo-history append <entry-json> [--log <markdown file>]
+  pomo-history done <event-json> [--log <markdown file>]
   pomo-history report [today|week|all]
 
-`append` adds one line to ~/.local/state/uni-pomo/history.jsonl (the source
-of truth) and, with --log, one line under today's heading in a markdown
-study log such as an Obsidian note:
+`append` adds one focus block to ~/.local/state/uni-pomo/history.jsonl (the
+source of truth) and, with --log, one line under today's heading in a
+markdown study log such as an Obsidian note. `done` does the same for a
+Todoist task marked done from the plugin:
 
     ## 2026-10-27 Tue
     - 14:05–14:30 · 25 min · D340 ch.4 reading
+    - 14:31 · ✓ Done · D340 ch.4 reading
 
-The entry comes from Service.qml (PomoModel.focusEntry) and is re-validated
-here. The log's parent folder must already exist, so a typo in the path
+Entries come from Service.qml (PomoModel.focusEntry / doneEntry) and are
+re-validated here. The log's parent folder must already exist, so a typo in the path
 never scatters new folders around. `report` totals minutes per subject.
 Standard library only.
 """
@@ -40,7 +43,7 @@ tags: [study, log]
 # Study log
 
 > [!ai]
-> Written by the Pomodoro plugin: one line per focus block, newest at the bottom.
+> Written by the Pomodoro plugin: one line per focus block (✓ marks a task done), newest at the bottom.
 > Totals: `uni-pomo report week`.
 """
 
@@ -51,16 +54,27 @@ def clean(text, limit):
     return s[:limit].strip()
 
 
-def validate(raw):
+def load(raw):
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise ValueError("entry is not an object")
+    return data
+
+
+def epoch_ms(data, key):
+    v = data.get(key)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v < EPOCH_MS_MAX:
+        raise ValueError("bad " + key)
+    return int(v)
+
+
+def validate(raw):
+    data = load(raw)
+    if data.get("kind", "focus") != "focus":
+        raise ValueError("not a focus block")
 
     def ms(key):
-        v = data.get(key)
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v < EPOCH_MS_MAX:
-            raise ValueError("bad " + key)
-        return int(v)
+        return epoch_ms(data, key)
 
     def minutes(key):
         v = data.get(key, 0)
@@ -77,6 +91,21 @@ def validate(raw):
         "outcome": data.get("outcome") if data.get("outcome") in ("done", "skipped", "stopped") else "done",
         "subject": clean(data.get("subject"), 120),
         "taskId": task_id if TASK_ID_RE.match(task_id) else "",
+    }
+
+
+# A Todoist task marked done from the plugin. Unlike a focus block, the task
+# id is required: there is nothing to record without one.
+def validate_done(raw):
+    data = load(raw)
+    task_id = str(data.get("taskId") or "")
+    if not TASK_ID_RE.match(task_id):
+        raise ValueError("bad taskId")
+    return {
+        "kind": "done",
+        "at": epoch_ms(data, "at"),
+        "subject": clean(data.get("subject"), 120),
+        "taskId": task_id,
     }
 
 
@@ -100,16 +129,22 @@ def md_text(text):
     return re.sub(r"([\\\[\]#*_`|<>])", r"\\\1", text)
 
 
+def subject_md(entry):
+    subject = md_text(entry["subject"]) if entry["subject"] else "No subject"
+    if entry["taskId"]:
+        subject = "[%s](%s%s)" % (subject, TASK_URL, entry["taskId"])
+    return subject
+
+
 def log_line(entry):
+    if entry.get("kind") == "done":
+        return "- " + " · ".join([local(entry["at"]).strftime("%H:%M"), "✓ Done", subject_md(entry)]) + "\n"
     start, end = local(entry["start"]), local(entry["end"])
     when = start.strftime("%H:%M") + "–" + end.strftime("%H:%M")
     mins = "%d min" % entry["minutes"]
     if entry["outcome"] != "done":
         mins += " (%s)" % entry["outcome"]
-    subject = md_text(entry["subject"]) if entry["subject"] else "No subject"
-    if entry["taskId"]:
-        subject = "[%s](%s%s)" % (subject, TASK_URL, entry["taskId"])
-    return "- " + " · ".join([when, mins, subject]) + "\n"
+    return "- " + " · ".join([when, mins, subject_md(entry)]) + "\n"
 
 
 def append_log(path, entry):
@@ -131,7 +166,7 @@ def append_log(path, entry):
         # Only the tail matters: is the last day heading today's?
         tail = os.pread(fd, TAIL_BYTES, max(0, size - TAIL_BYTES)).decode("utf-8", "replace")
 
-        start = local(entry["start"])
+        start = local(entry["at"] if entry.get("kind") == "done" else entry["start"])
         heading = "## " + start.strftime("%Y-%m-%d %a")
         out = LOG_HEADER.format(day=start.strftime("%Y-%m-%d")) if size == 0 else ""
         headings = [l for l in tail.splitlines() if l.startswith("## ")]
@@ -145,12 +180,12 @@ def append_log(path, entry):
         os.close(fd)
 
 
-def read_history():
+def read_history(check=validate):
     try:
         with open(HISTORY, encoding="utf-8") as f:
             for line in f:
                 try:
-                    yield validate(line)
+                    yield check(line)
                 except (ValueError, TypeError):
                     continue
     except FileNotFoundError:
@@ -178,10 +213,14 @@ def report(span):
         totals[key] = totals.get(key, 0) + e["minutes"]
         blocks += 1
 
+    done = [e for e in read_history(validate_done) if local(e["at"]).date() >= since]
+
     total = sum(totals.values())
-    print("%s · %d blocks · %s" % (title, blocks, hours(total)))
+    print("%s · %d blocks · %s · %d tasks done" % (title, blocks, hours(total), len(done)))
     for subject, mins in sorted(totals.items(), key=lambda kv: -kv[1]):
         print("  %8s  %s" % (hours(mins), subject))
+    for e in done:
+        print("  %8s  %s" % ("✓", e["subject"] or e["taskId"]))
     return 0
 
 
@@ -190,15 +229,15 @@ def hours(mins):
 
 
 def main(argv):
-    if len(argv) >= 2 and argv[0] == "append":
+    if len(argv) >= 2 and argv[0] in ("append", "done"):
         log = None
         if len(argv) == 4 and argv[2] == "--log":
             log = argv[3]
         elif len(argv) != 2:
-            print("usage: pomo-history append <entry-json> [--log <file>]", file=sys.stderr)
+            print("usage: pomo-history %s <entry-json> [--log <file>]" % argv[0], file=sys.stderr)
             return 1
         try:
-            entry = validate(argv[1])
+            entry = (validate if argv[0] == "append" else validate_done)(argv[1])
         except (ValueError, TypeError) as e:
             print("pomo-history: rejected entry: %s" % e, file=sys.stderr)
             return 2

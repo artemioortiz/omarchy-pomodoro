@@ -208,6 +208,11 @@ function focusEntry(startedAt, endedAt, focusedMs, plannedMs, outcome, subject, 
   }
 }
 
+// A Todoist task marked done from the plugin, for the same history and log.
+function doneEntry(at, subject, taskId) {
+  return { kind: "done", at: Math.round(at), subject: cleanSubject(subject), taskId: cleanTaskId(taskId) }
+}
+
 // ---- music (MPRIS)
 
 function isProxyPlayer(player) {
