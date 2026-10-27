@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Focus-block history for the pomodoro plugin.
+
+  pomo-history append <entry-json> [--log <markdown file>]
+  pomo-history report [today|week|all]
+
+`append` adds one line to ~/.local/state/uni-pomo/history.jsonl (the source
+of truth) and, with --log, one line under today's heading in a markdown
+study log such as an Obsidian note:
+
+    ## 2026-10-27 Tue
+    - 14:05–14:30 · 25 min · D340 ch.4 reading · ♪ Lofi — Girl
+
+The entry comes from Service.qml (PomoModel.focusEntry) and is re-validated
+here. The log's parent folder must already exist, so a typo in the path
+never scatters new folders around. `report` totals minutes per subject.
+Standard library only.
+"""
+
+import datetime
+import json
+import os
+import re
+import stat
+import sys
+
+STATE_DIR = os.path.join(os.path.expanduser("~"), ".local", "state", "uni-pomo")
+HISTORY = os.path.join(STATE_DIR, "history.jsonl")
+TASK_URL = "https://app.todoist.com/app/task/"
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]+")
+EPOCH_MS_MAX = 2 ** 53
+TAIL_BYTES = 64 * 1024
+
+LOG_HEADER = """---
+type: note
+created: {day}
+tags: [study, log]
+---
+# Study log
+
+> [!ai]
+> Written by the Pomodoro plugin: one line per focus block, newest at the bottom.
+> Totals: `uni-pomo report week`.
+"""
+
+
+def clean(text, limit):
+    s = CONTROL_RE.sub(" ", str(text or ""))
+    s = " ".join(s.split())
+    return s[:limit].strip()
+
+
+def validate(raw):
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("entry is not an object")
+
+    def ms(key):
+        v = data.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v < EPOCH_MS_MAX:
+            raise ValueError("bad " + key)
+        return int(v)
+
+    def minutes(key):
+        v = data.get(key, 0)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 7 * 24 * 60:
+            raise ValueError("bad " + key)
+        return int(v)
+
+    task_id = str(data.get("taskId") or "")
+    return {
+        "start": ms("start"),
+        "end": ms("end"),
+        "minutes": minutes("minutes"),
+        "planned": minutes("planned"),
+        "outcome": data.get("outcome") if data.get("outcome") in ("done", "skipped", "stopped") else "done",
+        "subject": clean(data.get("subject"), 120),
+        "taskId": task_id if TASK_ID_RE.match(task_id) else "",
+        "track": clean(data.get("track"), 200),
+    }
+
+
+def local(ms):
+    return datetime.datetime.fromtimestamp(ms / 1000)
+
+
+def append_history(entry):
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    fd = os.open(HISTORY, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("history is not a regular file")
+        os.write(fd, (json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def md_text(text):
+    # Keep a subject from turning into markdown structure (links, tags, headings).
+    return re.sub(r"([\\\[\]#*_`|<>])", r"\\\1", text)
+
+
+def log_line(entry):
+    start, end = local(entry["start"]), local(entry["end"])
+    when = start.strftime("%H:%M") + "–" + end.strftime("%H:%M")
+    mins = "%d min" % entry["minutes"]
+    if entry["outcome"] != "done":
+        mins += " (%s)" % entry["outcome"]
+    subject = md_text(entry["subject"]) if entry["subject"] else "No subject"
+    if entry["taskId"]:
+        subject = "[%s](%s%s)" % (subject, TASK_URL, entry["taskId"])
+    parts = [when, mins, subject]
+    if entry["track"]:
+        parts.append("♪ " + md_text(entry["track"]))
+    return "- " + " · ".join(parts) + "\n"
+
+
+def append_log(path, entry):
+    path = os.path.expanduser(path)
+    parent = os.path.dirname(path) or "."
+    if not os.path.isdir(parent):
+        raise OSError("study log folder does not exist: " + parent)
+    # O_NOFOLLOW + fstat on the open descriptor: a symlink, FIFO or device at
+    # the path is refused instead of written through or blocked on.
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o644)
+    except OSError as e:
+        raise OSError("study log %s: %s" % (path, e.strerror))
+    try:
+        st = os.fstat(fd)
+        size = st.st_size
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError("study log is not a regular file: " + path)
+        # Only the tail matters: is the last day heading today's?
+        tail = os.pread(fd, TAIL_BYTES, max(0, size - TAIL_BYTES)).decode("utf-8", "replace")
+
+        start = local(entry["start"])
+        heading = "## " + start.strftime("%Y-%m-%d %a")
+        out = LOG_HEADER.format(day=start.strftime("%Y-%m-%d")) if size == 0 else ""
+        headings = [l for l in tail.splitlines() if l.startswith("## ")]
+        if not headings or headings[-1].strip() != heading:
+            if tail and not tail.endswith("\n"):
+                out += "\n"
+            out += "\n" + heading + "\n"
+        out += log_line(entry)
+        os.write(fd, out.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def read_history():
+    try:
+        with open(HISTORY, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    yield validate(line)
+                except (ValueError, TypeError):
+                    continue
+    except FileNotFoundError:
+        return
+
+
+def report(span):
+    today = datetime.date.today()
+    if span == "today":
+        since, title = today, "Today"
+    elif span == "week":
+        since = today - datetime.timedelta(days=today.weekday())
+        title = "This week (since %s)" % since.strftime("%a %b %-d")
+    elif span == "all":
+        since, title = datetime.date.min, "All time"
+    else:
+        print("usage: pomo-history report [today|week|all]", file=sys.stderr)
+        return 1
+
+    totals, blocks = {}, 0
+    for e in read_history():
+        if local(e["start"]).date() < since or not e["minutes"]:
+            continue
+        key = e["subject"] or "No subject"
+        totals[key] = totals.get(key, 0) + e["minutes"]
+        blocks += 1
+
+    total = sum(totals.values())
+    print("%s · %d blocks · %s" % (title, blocks, hours(total)))
+    for subject, mins in sorted(totals.items(), key=lambda kv: -kv[1]):
+        print("  %8s  %s" % (hours(mins), subject))
+    return 0
+
+
+def hours(mins):
+    return "%dh %02dm" % divmod(mins, 60) if mins >= 60 else "%d min" % mins
+
+
+def main(argv):
+    if len(argv) >= 2 and argv[0] == "append":
+        log = None
+        if len(argv) == 4 and argv[2] == "--log":
+            log = argv[3]
+        elif len(argv) != 2:
+            print("usage: pomo-history append <entry-json> [--log <file>]", file=sys.stderr)
+            return 1
+        try:
+            entry = validate(argv[1])
+        except (ValueError, TypeError) as e:
+            print("pomo-history: rejected entry: %s" % e, file=sys.stderr)
+            return 2
+        append_history(entry)
+        if log:
+            try:
+                append_log(log, entry)
+            except OSError as e:
+                print("pomo-history: %s" % e, file=sys.stderr)
+                return 3
+        return 0
+    if argv and argv[0] == "report":
+        return report(argv[1] if len(argv) > 1 else "today")
+    print(__doc__.split("\n\n")[1], file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

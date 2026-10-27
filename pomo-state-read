@@ -32,6 +32,9 @@ STATE_DIR = os.path.join(os.path.expanduser("~"), ".local", "state", "uni-pomo")
 STATE_FILE = "state.json"
 
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+PLAYER_RE = re.compile(r"^org\.mpris\.MediaPlayer2\.[A-Za-z0-9_.-]{1,200}$")
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 MS_MAX = 7 * 24 * 60 * 60 * 1000          # a block can't be longer than a week
 EPOCH_MS_MAX = 2 ** 53                    # anything above is not a real timestamp
 
@@ -108,6 +111,23 @@ def as_enum(v, allowed):
     return v if isinstance(v, str) and v in allowed else None
 
 
+def as_text(v, limit):
+    if not isinstance(v, str) or len(v) > limit or CONTROL_RE.search(v):
+        return None
+    return v
+
+
+def as_match(v, pattern):
+    return v if isinstance(v, str) and pattern.match(v) else None
+
+
+def as_list(v, item, limit):
+    if not isinstance(v, list):
+        return None
+    out = [x for x in (item(x) for x in v[:limit]) if x is not None]
+    return out
+
+
 def sanitize(raw):
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -133,6 +153,13 @@ def sanitize(raw):
         "dndBefore": as_bool(data.get("dndBefore")),
         "dndApplied": as_bool(data.get("dndApplied")),
         "tipIndex": as_int(data.get("tipIndex"), 0, 1000000),
+        "subject": as_text(data.get("subject"), 120),
+        "subjectTaskId": as_match(data.get("subjectTaskId"), TASK_ID_RE),
+        "subjectDone": as_bool(data.get("subjectDone")),
+        "recentSubjects": as_list(data.get("recentSubjects"), lambda x: as_text(x, 120), 8),
+        "focusStartedAt": as_int(data.get("focusStartedAt"), 0, EPOCH_MS_MAX),
+        "focusTrack": as_text(data.get("focusTrack"), 200),
+        "pausedPlayers": as_list(data.get("pausedPlayers"), lambda x: as_match(x, PLAYER_RE), 16),
     }
     out = {"version": 1}
     for key, value in fields.items():

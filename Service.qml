@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.Mpris
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
@@ -14,11 +15,18 @@ import "PomoModel.js" as Pomo
 // survives suspend, shell restarts and theme switches: state is persisted to
 // ~/.local/state/uni-pomo/state.json on every transition and rehydrated on
 // load through the bundled `pomo-state-read` helper (bounded, O_NOFOLLOW,
-// fstat-validated, whitelisted). Configuration is read live from this
-// plugin's entry in shell.json.
+// fstat-validated, whitelisted). Configuration is this plugin's inline entry
+// in shell.json, handed over by the bar widget: third-party services get a
+// scoped shell API with no access to shellConfig.
+//
+// Each focus block that ends (done, skipped or stopped, at least a minute) is
+// appended by `pomo-history` to ~/.local/state/uni-pomo/history.jsonl and,
+// when `studyLog` is set, to that markdown file. Music playing over MPRIS is
+// paused when a break starts and only what we paused is resumed on focus.
 //
 // IPC: `omarchy-shell pomodoro <status|start|pause|resume|toggle|stop|skip|
-//        focus <min>|shortBreak <min>|longBreak <min>|extend <min>|hideBreak|showBreak>`
+//        focus <min>|shortBreak <min>|longBreak <min>|extend <min>|hideBreak|showBreak|
+//        setSubject <text> <todoist id>|clearSubject|todoistDone>`
 Item {
   id: root
 
@@ -35,9 +43,12 @@ Item {
   readonly property string sourceDir: manifest && manifest.__sourceDir
     ? String(manifest.__sourceDir).replace(/^file:\/\//, "").replace(/\/$/, "") : ""
   readonly property string stateReaderPath: sourceDir ? sourceDir + "/pomo-state-read" : ""
+  readonly property string historyPath: sourceDir ? sourceDir + "/pomo-history" : ""
+  readonly property string todoistPath: sourceDir ? sourceDir + "/pomo-todoist" : ""
+  readonly property string cliPath: sourceDir ? sourceDir + "/uni-pomo" : ""
 
-  // ---- configuration (inline on the widget's bar entry; hot-reloaded by the shell)
-  readonly property var entry: Pomo.findEntry(shell ? shell.shellConfig : null, pluginId)
+  // ---- configuration (inline on the widget's bar entry; set by BarWidget.qml)
+  property var entry: null
   readonly property var config: Pomo.config(entry)
 
   // ---- state
@@ -57,6 +68,14 @@ Item {
   property int tipIndex: 0
   property bool hydrated: false
 
+  property string subject: ""          // what this focus is for: free text or a Todoist task
+  property string subjectTaskId: ""    // Todoist task id when the subject came from Todoist
+  property bool subjectDone: false     // that task was marked done from here
+  property var recentSubjects: []
+  property real focusStartedAt: 0      // epoch ms; non-zero while a focus block is open
+  property string focusTrack: ""       // last thing heard during the open focus block
+  property var pausedPlayers: []       // MPRIS bus names we paused for a break
+
   readonly property bool active: phase === "focus" || Pomo.isBreak(phase)
   readonly property bool isBreak: Pomo.isBreak(phase)
   readonly property bool paused: active && !running
@@ -69,7 +88,8 @@ Item {
 
   readonly property bool dndWanted: config.dnd && phase === "focus" && running
   readonly property bool overlayVisible: hydrated && config.overlay && !overlayDismissed && (isBreak || phase === "ready")
-  readonly property var notificationService: shell && typeof shell.serviceFor === "function" ? shell.serviceFor("omarchy.notifications") : null
+  readonly property var players: Mpris.players ? Mpris.players.values : []
+  readonly property string nowPlaying: Pomo.trackLabel(Pomo.firstPlaying(players))
 
   // ------------------------------------------------------------------ engine
 
@@ -87,6 +107,15 @@ Item {
   }
 
   function begin(nextPhase, minutes) {
+    if (nextPhase === "focus") {
+      endFocus("stopped")             // a preset clicked mid-focus restarts the block
+      focusStartedAt = now()
+      focusTrack = nowPlaying
+      resumeMusic()
+    } else {
+      endFocus("skipped")
+      if (phase === "focus") pauseMusic()
+    }
     phase = nextPhase
     plannedMs = Math.max(1, minutes) * 60000
     remainingMs = plannedMs
@@ -109,6 +138,10 @@ Item {
   }
 
   function enterReady(next) {
+    if (phase === "focus") {
+      endFocus("skipped")             // no-op after complete(), which already logged "done"
+      pauseMusic()
+    }
     phase = "ready"
     readyNext = next === "break" ? "break" : "focus"
     running = false
@@ -122,7 +155,7 @@ Item {
   function complete() {
     running = false
     if (phase === "focus") {
-      bumpToday(plannedMs)
+      endFocus("done")
       cyclesDone += 1
       chime(config.soundFocusEnd)
       var kind = Pomo.nextBreakKind(cyclesDone, config.longEvery)
@@ -183,6 +216,8 @@ Item {
   }
 
   function stop() {
+    endFocus("stopped")
+    resumeMusic()
     phase = "idle"
     readyNext = "focus"
     running = false
@@ -213,44 +248,174 @@ Item {
 
   function rollDay() {
     var today = Pomo.todayKey()
-    if (day !== today) {
-      day = today
-      todayCount = 0
-      todayMinutes = 0
+    if (day === today) return false
+    day = today
+    todayCount = 0
+    todayMinutes = 0
+    return true
+  }
+
+  // Close the open focus block: count the minutes actually focused (paused
+  // time excluded) and log it. Blocks under a minute are dropped as misclicks.
+  function endFocus(outcome) {
+    if (!focusStartedAt) return
+    var left = running ? Math.max(0, endsAt - now()) : remainingMs
+    var focusedMs = outcome === "done" ? plannedMs : Math.max(0, plannedMs - left)
+    var entry = Pomo.focusEntry(focusStartedAt, now(), focusedMs, plannedMs, outcome,
+                                subject, subjectDone ? "" : subjectTaskId, focusTrack || nowPlaying)
+    focusStartedAt = 0
+    focusTrack = ""
+    if (entry.minutes < 1) return
+    rollDay()
+    if (outcome === "done") todayCount += 1
+    todayMinutes += entry.minutes
+    recordFocus(entry)
+  }
+
+  // ------------------------------------------------------------------ subject
+
+  function setSubject(text, taskId) {
+    var s = Pomo.cleanSubject(text)
+    subject = s
+    subjectTaskId = s ? Pomo.cleanTaskId(taskId) : ""
+    subjectDone = false
+    if (s) recentSubjects = Pomo.addRecent(recentSubjects, s)
+    persist()
+  }
+
+  function pickSubject() {
+    if (cliPath) Quickshell.execDetached(["bash", cliPath, "subject"])
+  }
+
+  function todoistDone() {
+    if (!subjectTaskId || subjectDone || todoistCloser.running || !todoistPath) return
+    todoistCloser.taskId = subjectTaskId
+    todoistCloser.label = subject
+    todoistCloser.command = ["python3", todoistPath, "close", subjectTaskId]
+    todoistCloser.running = true
+  }
+
+  Process {
+    id: todoistCloser
+    property string taskId: ""
+    property string label: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = Pomo.parseState(text) || { ok: false, error: "no answer from pomo-todoist" }
+        if (r.ok) {
+          // The subject may have changed while the request was in flight.
+          if (root.subjectTaskId === todoistCloser.taskId) {
+            root.subjectDone = true
+            root.persist()
+          }
+          root.notify("Done in Todoist", todoistCloser.label, "󰄬")
+        } else {
+          root.notify("Todoist", String(r.error || "could not close the task"), "󰀦")
+        }
+      }
     }
   }
 
-  function bumpToday(ms) {
-    rollDay()
-    todayCount += 1
-    todayMinutes += Math.round(ms / 60000)
+  // ------------------------------------------------------------------ history
+
+  function recordFocus(entry) {
+    if (!historyPath) return
+    var cmd = ["python3", historyPath, "append", JSON.stringify(entry)]
+    if (config.studyLog) cmd.push("--log", config.studyLog)
+    historyWriter.queue.push(cmd)
+    historyWriter.next()
   }
+
+  // One write at a time so two blocks ending together can't interleave lines.
+  Process {
+    id: historyWriter
+    property var queue: []
+    function next() {
+      if (running || !queue.length) return
+      command = queue.shift()
+      running = true
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim()) root.notify("Study log", text.trim().replace(/^pomo-history: /, ""), "󰀦")
+    }
+    onExited: Qt.callLater(next)
+  }
+
+  // ------------------------------------------------------------------ music
+
+  function pauseMusic() {
+    if (!config.music) return
+    var list = Pomo.playersToPause(players)
+    var keys = pausedPlayers.slice()
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i]
+      if (p.canPause) p.pause()
+      else p.togglePlaying()
+      if (keys.indexOf(p.dbusName) === -1) keys.push(p.dbusName)
+    }
+    pausedPlayers = keys
+  }
+
+  // Resume only what pauseMusic stopped, and only if it's still paused:
+  // something you paused or switched yourself during the break stays put.
+  function resumeMusic() {
+    var keys = pausedPlayers
+    pausedPlayers = []
+    if (!config.music || !keys.length) return
+    for (var i = 0; i < players.length; i++) {
+      var p = players[i]
+      if (!p || p.isPlaying || keys.indexOf(p.dbusName) === -1) continue
+      if (p.canPlay) p.play()
+      else if (p.canTogglePlaying) p.togglePlaying()
+    }
+  }
+
+  onNowPlayingChanged: if (phase === "focus" && running && nowPlaying) focusTrack = nowPlaying
 
   // ------------------------------------------------------------------ effects
 
-  onDndWantedChanged: syncDnd()
+  onDndWantedChanged: { dndTries = 0; syncDnd() }
+
+  // DND goes through the notifications plugin's IPC: the scoped plugin API
+  // doesn't hand third-party plugins the notifications service.
+  property int dndTries: 0
 
   function syncDnd() {
-    var svc = notificationService
-    if (!svc || typeof svc.setDoNotDisturb !== "function") return
     if (dndWanted && !dndApplied) {
-      dndBefore = !!svc.doNotDisturb
-      svc.setDoNotDisturb(true)
-      dndApplied = true
-      persist()
+      if (dndReader.running || dndTries >= 5) return
+      dndTries += 1
+      dndReader.running = true          // continues in onStreamFinished
     } else if (!dndWanted && dndApplied) {
-      svc.setDoNotDisturb(dndBefore)
+      Quickshell.execDetached([omarchyPath + "/bin/omarchy-shell", "notifications", "setDnd", dndBefore ? "on" : "off"])
       dndApplied = false
       persist()
     }
   }
 
-  // The notifications service may come up after us; keep trying while the
+  Process {
+    id: dndReader
+    command: [root.omarchyPath + "/bin/omarchy-shell", "notifications", "dndState"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var state = text.trim()
+        if (!root.dndWanted || root.dndApplied || (state !== "on" && state !== "off")) return
+        root.dndBefore = state === "on"
+        Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-shell", "notifications", "setDnd", "on"])
+        root.dndApplied = true
+        root.persist()
+      }
+    }
+  }
+
+  // The notifications plugin may come up after us; keep trying while the
   // wanted and applied DND states disagree.
   Timer {
     interval: 2000
     repeat: true
-    running: root.hydrated && root.dndWanted !== root.dndApplied
+    running: root.hydrated && root.dndWanted !== root.dndApplied && root.dndTries < 5
     onTriggered: root.syncDnd()
   }
 
@@ -275,6 +440,8 @@ Item {
       cyclesDone: cyclesDone, longEvery: config.longEvery,
       todayCount: todayCount, todayMinutes: todayMinutes,
       dnd: dndApplied, breakScreen: overlayVisible,
+      subject: subject, subjectTaskId: subjectTaskId, subjectDone: subjectDone,
+      recentSubjects: recentSubjects, nowPlaying: nowPlaying, musicPaused: pausedPlayers.length,
       config: config
     })
   }
@@ -285,12 +452,23 @@ Item {
       version: 1, phase: phase, readyNext: readyNext, running: running,
       endsAt: endsAt, remainingMs: remainingMs, plannedMs: plannedMs,
       cyclesDone: cyclesDone, day: day, todayCount: todayCount, todayMinutes: todayMinutes,
-      dndBefore: dndBefore, dndApplied: dndApplied, tipIndex: tipIndex
+      dndBefore: dndBefore, dndApplied: dndApplied, tipIndex: tipIndex,
+      subject: subject, subjectTaskId: subjectTaskId, subjectDone: subjectDone,
+      recentSubjects: recentSubjects, focusStartedAt: focusStartedAt, focusTrack: focusTrack,
+      pausedPlayers: pausedPlayers
     }, null, 2) + "\n")
   }
 
+  // Settings come from the bar widget a moment after load; restoring needs
+  // them (staleAfter, dnd), so hold the state until they arrive or the
+  // fallback fires.
+  property var pendingState: null
+  property bool hydrateTimedOut: false
+  onEntryChanged: if (!hydrated && pendingState !== null) hydrate(pendingState)
+
   function hydrate(raw) {
     if (hydrated) return
+    if (entry === null && !hydrateTimedOut) { pendingState = String(raw || ""); return }
     var s = Pomo.parseState(raw)
     hydrated = true
     if (!s) { rollDay(); return }
@@ -303,6 +481,11 @@ Item {
     tipIndex = Number(s.tipIndex || 0)
     dndBefore = !!s.dndBefore
     dndApplied = !!s.dndApplied
+    subject = Pomo.cleanSubject(s.subject)
+    subjectTaskId = subject ? Pomo.cleanTaskId(s.subjectTaskId) : ""
+    subjectDone = !!s.subjectDone
+    recentSubjects = Pomo.addRecent(s.recentSubjects, "")
+    pausedPlayers = Array.isArray(s.pausedPlayers) ? s.pausedPlayers.map(String) : []
 
     var p = String(s.phase || "idle")
     if (p === "focus" || p === "short" || p === "long") {
@@ -323,6 +506,10 @@ Item {
         phase = p
         remainingMs = Number(s.remainingMs || 0)
         running = false
+      }
+      if (phase === "focus") {
+        focusStartedAt = Number(s.focusStartedAt || 0) || now() - Math.max(0, plannedMs - remainingMs)
+        focusTrack = Pomo.cleanSubject(s.focusTrack)
       }
     } else if (p === "ready") {
       phase = "ready"
@@ -368,7 +555,10 @@ Item {
   Timer {
     id: hydrateFallback
     interval: 5000
-    onTriggered: root.hydrate("")
+    onTriggered: {
+      root.hydrateTimedOut = true
+      root.hydrate(root.pendingState !== null ? root.pendingState : "")
+    }
   }
 
   Component.onCompleted: {
@@ -395,6 +585,14 @@ Item {
     onTriggered: root.tipIndex += 1
   }
 
+  // Reset "today" at midnight even when no block finishes after it.
+  Timer {
+    interval: 60000
+    repeat: true
+    running: root.hydrated
+    onTriggered: if (root.rollDay()) root.persist()
+  }
+
   IpcHandler {
     target: "pomodoro"
 
@@ -411,6 +609,9 @@ Item {
     function extend(minutes: string): string { root.extend(Number(minutes)); return root.statusJson() }
     function hideBreak(): string { root.dismissOverlay(); return root.statusJson() }
     function showBreak(): string { root.showOverlay(); return root.statusJson() }
+    function setSubject(text: string, taskId: string): string { root.setSubject(text, taskId); return root.statusJson() }
+    function clearSubject(): string { root.setSubject("", ""); return root.statusJson() }
+    function todoistDone(): string { root.todoistDone(); return root.statusJson() }
   }
 
   // ------------------------------------------------------------------ break screen
@@ -525,6 +726,19 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             width: Math.min(win.width * 0.7, win.ringSize * 2.2)
             horizontalAlignment: Text.AlignHCenter
+            visible: root.subject !== ""
+            elide: Text.ElideRight
+            text: (root.subjectDone ? "󰄬  " : "") + root.subject
+            textFormat: Text.PlainText // subjects can be Todoist titles: never render markup
+            color: win.fg
+            font.family: win.fontFamily
+            font.pixelSize: Math.round(win.ringSize * 0.07)
+          }
+
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(win.width * 0.7, win.ringSize * 2.2)
+            horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
             text: root.phase === "ready"
               ? (root.readyNext === "break" ? "Nice work. Take the break." : "Ready when you are.")
@@ -607,6 +821,18 @@ Item {
               horizontalPadding: Style.space(16)
               verticalPadding: Style.space(9)
               onClicked: root.skip()
+            }
+            Button {
+              visible: root.subjectTaskId !== "" && !root.subjectDone
+              iconText: "󰄬"
+              text: "Done in Todoist"
+              foreground: win.fg
+              accent: win.accent
+              bordered: true
+              fontSize: Style.font.title
+              horizontalPadding: Style.space(16)
+              verticalPadding: Style.space(9)
+              onClicked: root.todoistDone()
             }
             Button {
               iconText: "󰓛"

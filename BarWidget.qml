@@ -31,6 +31,10 @@ BarWidget {
   readonly property var dots: ready ? pomo.dots : []
   readonly property int todayCount: ready ? pomo.todayCount : 0
   readonly property int todayMinutes: ready ? pomo.todayMinutes : 0
+  readonly property string subject: ready ? pomo.subject : ""
+  readonly property bool subjectDone: ready ? pomo.subjectDone : false
+  readonly property bool hasTask: ready && pomo.subjectTaskId !== "" && !pomo.subjectDone
+  readonly property string nowPlaying: ready ? pomo.nowPlaying : ""
 
   readonly property color accent: Color.accent
   readonly property color fg: bar ? bar.foreground : Color.foreground
@@ -40,7 +44,8 @@ BarWidget {
     if (!ready) return "󰔛"
     if (phase === "idle") return "󰔛"
     if (phase === "ready") return icon + "  " + (pomo.readyNext === "break" ? "break?" : "focus?")
-    return icon + "  " + clock
+    var label = cfg.showSubject && subject ? "  " + Pomo.shorten(subject, 24) : ""
+    return icon + "  " + clock + label
   }
 
   readonly property string tooltip: {
@@ -48,6 +53,7 @@ BarWidget {
     if (phase === "idle") return "Pomodoro — click for options, right-click to start " + cfg.focus + " min focus"
     if (phase === "ready") return phaseLabel + " — right-click to continue"
     return phaseLabel + (paused ? " (paused)" : "") + " · " + clock + " left · " + pomo.cyclesDone + "/" + cfg.longEvery + " this set"
+      + (subject ? "\n" + subject : "")
   }
 
   property bool popupOpen: false
@@ -66,6 +72,15 @@ BarWidget {
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
+
+  // The engine can't read shell.json itself (scoped plugin API), so hand it
+  // this widget's inline settings; they update live like the widget's own.
+  function pushSettings() {
+    if (root.ready) root.pomo.entry = root.settings
+  }
+  onSettingsChanged: pushSettings()
+  onPomoChanged: pushSettings()
+  Component.onCompleted: pushSettings()
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -124,7 +139,7 @@ BarWidget {
     bar: root.bar
     owner: root
     open: root.popupOpen
-    contentWidth: popup.fittedContentWidth(Style.space(312))
+    contentWidth: popup.fittedContentWidth(Style.space(360))
     contentHeight: popup.fittedContentHeight(column.implicitHeight)
 
     Column {
@@ -245,6 +260,54 @@ BarWidget {
 
       PanelSeparator { width: parent.width; foreground: root.fg }
 
+      // ---- what this focus is for (picker runs in the Omarchy menu: Todoist tasks, recents, free text)
+      PanelSectionHeader { text: "Working on"; foreground: root.fg; fontFamily: root.bar.fontFamily }
+
+      Text {
+        width: parent.width
+        text: root.subject ? (root.subjectDone ? "󰄬  " : "") + root.subject : "Nothing set"
+        textFormat: Text.PlainText // subjects can be Todoist titles: never render markup
+        color: root.subject ? root.fg : Util.alpha(root.fg, 0.5)
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.body
+        wrapMode: Text.WordWrap
+        maximumLineCount: 2
+        elide: Text.ElideRight
+      }
+
+      Row {
+        spacing: Style.space(6)
+        Button {
+          iconText: "󰏫"
+          text: root.subject ? "Change…" : "Pick…"
+          tooltipText: "Pick a Todoist task, a recent subject, or type one"
+          foreground: root.fg
+          accent: root.accent
+          bordered: true
+          onClicked: if (root.ready) { root.close(); root.pomo.pickSubject() }
+        }
+        Button {
+          visible: root.hasTask
+          iconText: "󰄬"
+          text: "Done in Todoist"
+          foreground: root.fg
+          accent: root.accent
+          bordered: true
+          onClicked: if (root.ready) root.pomo.todoistDone()
+        }
+        Button {
+          visible: root.subject !== ""
+          iconText: "󰅖"
+          tooltipText: "Clear the subject"
+          foreground: root.fg
+          accent: root.accent
+          bordered: true
+          onClicked: if (root.ready) root.pomo.setSubject("", "")
+        }
+      }
+
+      PanelSeparator { width: parent.width; foreground: root.fg }
+
       // ---- quick starts
       PanelSectionHeader { text: "Focus"; foreground: root.fg; fontFamily: root.bar.fontFamily }
 
@@ -308,6 +371,34 @@ BarWidget {
         accent: root.accent
         fontFamily: root.bar.fontFamily
         onClicked: root.writeSetting("overlay", !root.cfg.overlay)
+      }
+      Toggle {
+        width: parent.width
+        label: "Start breaks automatically"
+        checked: root.cfg.autoStartBreak
+        foreground: root.fg
+        accent: root.accent
+        fontFamily: root.bar.fontFamily
+        onClicked: root.writeSetting("autoStartBreak", !root.cfg.autoStartBreak)
+      }
+      Toggle {
+        width: parent.width
+        label: "Start focus after a break"
+        checked: root.cfg.autoStartFocus
+        foreground: root.fg
+        accent: root.accent
+        fontFamily: root.bar.fontFamily
+        onClicked: root.writeSetting("autoStartFocus", !root.cfg.autoStartFocus)
+      }
+      Toggle {
+        width: parent.width
+        label: "Pause music during breaks"
+        description: root.nowPlaying ? "♪ " + root.nowPlaying : ""
+        checked: root.cfg.music
+        foreground: root.fg
+        accent: root.accent
+        fontFamily: root.bar.fontFamily
+        onClicked: root.writeSetting("music", !root.cfg.music)
       }
       Toggle {
         width: parent.width

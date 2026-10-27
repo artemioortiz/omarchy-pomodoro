@@ -9,6 +9,67 @@ survives shell restarts, theme switches and suspend.
 Classic rhythm out of the box: **25 min focus · 5 min break · 15 min long break
 after every 4th block**. Everything is a setting.
 
+This fork adds three things for studying:
+
+- **Working on:** give each focus block a subject, either picked from your
+  Todoist tasks or typed in. It shows in the bar and on the break screen, and
+  a Todoist task can be marked done from the popup or the break screen.
+- **Study log:** every focus block that lasted at least a minute is recorded
+  with the minutes actually focused, the subject and what was playing.
+  Optionally it is also appended to a markdown file such as an Obsidian note.
+  `uni-pomo report week` totals the time per subject.
+- **Music:** whatever is playing over MPRIS (YouTube Music or Pandora in a
+  browser, Spotify, a podcast or audiobook app) is paused when a break starts
+  and resumed when focus starts again (or when you stop the timer). Only what
+  the timer paused is resumed.
+
+## Working on: subjects and Todoist
+
+Click **Pick…** in the popup (or run `uni-pomo subject`) to open a picker in the
+Omarchy menu. It lists Todoist tasks that match your `todoistFilter`, your
+recent subjects, and *New subject…* for free text. `uni-pomo subject "D340 ch.4"`
+sets one directly.
+
+Todoist is optional. To connect it, copy your API token from Todoist
+(**Settings → Integrations → Developer**). Then run this and paste the token
+when it shows `Todoist token:`. Nothing appears as you paste, so the token
+never lands on screen or in your shell history:
+
+```bash
+mkdir -p ~/.config/uni-pomo && read -rsp 'Todoist token: ' t && printf %s "$t" > ~/.config/uni-pomo/todoist-token && chmod 600 ~/.config/uni-pomo/todoist-token && unset t
+```
+
+The token is never written to `shell.json`, and the helper refuses a token
+file that anyone else can read. Point the picker at what you study with any
+Todoist filter, for example `##WGU | @study` (a project and its subprojects, or
+anything labelled `@study`):
+
+```bash
+uni-pomo set todoistFilter '##WGU | @study'
+```
+
+## Study log
+
+Each focus block that ends (finished, skipped or stopped, at least one minute)
+is appended to `~/.local/state/uni-pomo/history.jsonl`. Paused time does not
+count. To also keep a markdown log, set `studyLog` to a file whose folder
+exists:
+
+```bash
+uni-pomo set studyLog "~/Obsidian/Journal/Study log.md"
+```
+
+The file is created with frontmatter on first use and gets one heading per
+day:
+
+```markdown
+## 2026-10-27 Tue
+- 14:05–14:30 · 25 min · [D340 ch.4 reading](https://app.todoist.com/app/task/…) · ♪ Lofi — Girl
+- 14:35–14:47 · 12 min (stopped) · D340 ch.4 reading
+```
+
+`uni-pomo report [today|week|all]` prints the totals per subject.
+
 ## The popup
 
 ![Pomodoro popup in the bar](screenshots/popup.png)
@@ -61,13 +122,15 @@ hairline under the label while a block runs.
 - `python3` (standard library only) for the bundled state reader — a hard
   dependency of Omarchy itself, so nothing extra to install.
 - Optional, for the CLI: `jq` (standard on Omarchy).
+- Optional: a Todoist account for the subject picker. Music control uses
+  MPRIS through the shell itself, so `playerctl` is not needed.
 
 No sudo or pkexec is required.
 
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/techywilbur/omarchy-pomodoro.git --enable
+omarchy plugin add https://github.com/artemioortiz/omarchy-pomodoro.git --enable
 ```
 
 `--enable` places the widget in the bar's center section (you can choose a
@@ -90,16 +153,19 @@ omarchy plugin update techywilbur.pomodoro
 omarchy plugin remove techywilbur.pomodoro
 ```
 
-That deletes the plugin folder and its bar entry. The only other thing the
-plugin creates is its state file, `~/.local/state/uni-pomo/state.json`, which
-you can delete by hand. If you installed the optional CLI, menu entries or
+That deletes the plugin folder and its bar entry. The plugin also creates
+`~/.local/state/uni-pomo/` (state and history) and, if you set them up, your
+Todoist token in `~/.config/uni-pomo/` and the `studyLog` file. Delete those by
+hand if you want them gone. If you installed the optional CLI, menu entries or
 keybinds below, remove those the same way you added them.
 
 ## Settings
 
 Settings live inline on the widget's entry in `~/.config/omarchy/shell.json`
-and can be edited from the Omarchy bar settings panel or the popup toggles.
-Changes apply immediately.
+and can be edited from the Omarchy bar settings panel, the popup toggles or
+`uni-pomo set`. Changes apply immediately. The bar widget hands them to the
+engine (Omarchy's plugin API doesn't let a plugin service read `shell.json`),
+so keep the widget on the bar or the timer runs on the defaults.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -118,6 +184,10 @@ Changes apply immediately.
 | `soundFocusEnd` | freedesktop `complete.oga` | Sound file played when focus ends |
 | `soundBreakEnd` | freedesktop `message.oga` | Sound file played when a break ends |
 | `staleAfter` | `30` | Minutes after which a restored, already-ended block is dropped |
+| `music` | `true` | Pause what's playing when a break starts, resume it on focus |
+| `showSubject` | `true` | Show the subject next to the countdown in the bar |
+| `todoistFilter` | `today \| overdue` | Todoist filter for the subject picker |
+| `studyLog` | `""` | Markdown file each focus block is appended to (empty = off) |
 
 Example entry:
 
@@ -166,6 +236,8 @@ omarchy-shell pomodoro toggle                # start / pause / resume
 omarchy-shell pomodoro focus 50              # also: shortBreak, longBreak, extend <min>
 omarchy-shell pomodoro skip | stop | pause | resume
 omarchy-shell pomodoro hideBreak | showBreak # break screen
+omarchy-shell pomodoro setSubject "D340 ch.4" ""   # text, Todoist task id (or "")
+omarchy-shell pomodoro clearSubject | todoistDone
 omarchy-shell shell toggle techywilbur.pomodoro   # open / close the popup
 ```
 
@@ -185,12 +257,23 @@ omarchy-shell shell toggle techywilbur.pomodoro   # open / close the popup
   shell a whitelisted, range-checked object. A planted FIFO, symlink or
   oversized file cannot block or bloat the shell at startup; the timer just
   starts fresh.
-- Do Not Disturb goes through the shell's own notifications service; the state
-  you had before the focus block is restored when it ends.
+- Do Not Disturb goes through the notifications plugin's IPC
+  (`omarchy-shell notifications setDnd`); the state you had before the focus
+  block is restored when it ends.
 - The chime is played with `pw-play` (falling back to `paplay`); notifications
   use `omarchy-notification-send`.
 - The plugin writes to `~/.config/omarchy/shell.json` only when you change a
   setting from the popup, and only its own widget entry.
+- `pomo-history` appends each focus block to `history.jsonl` and, if
+  `studyLog` is set, to that file. It refuses a log whose folder is missing or
+  that isn't a regular file (symlink, FIFO), and escapes markdown in subjects so a subject can't turn
+  into a link, tag or heading.
+- `pomo-todoist` is the only part that uses the network. It talks to
+  `api.todoist.com` (API v1) and only when you open the picker or mark a task
+  done. It reads the token from `~/.config/uni-pomo/todoist-token`, which must
+  be a regular file you own with mode 600.
+- Music control uses the shell's MPRIS service. The `playerctld` proxy is
+  skipped so nothing is paused twice.
 - No sudo or pkexec is required. Nothing is installed outside the plugin folder
   unless you copy the optional CLI yourself.
 
@@ -202,6 +285,9 @@ Service.qml          engine, persistence, DND, break screen; IPC target `pomodor
 BarWidget.qml        bar label + popup; IPC target `techywilbur.pomodoro`
 PomoModel.js         pure logic: settings parsing, phases, formatting
 pomo-state-read      bounded, non-following state reader (python3, stdlib only)
+pomo-history         history.jsonl + markdown study log, and `report` (python3, stdlib only)
+pomo-todoist         Todoist API v1: list tasks for the picker, close a task (python3, stdlib only)
+tests/               node --test tests/*.test.mjs (PomoModel.js)
 uni-pomo             optional bash CLI
 extras/bindings.lua  optional Hyprland keybinds
 extras/omarchy-menu.jsonc  optional Omarchy menu entries
@@ -211,4 +297,5 @@ preview.png          marketplace preview
 
 ## License
 
-[MIT](LICENSE) © 2026 Wilbur Lindqvist
+[MIT](LICENSE) © 2026 Wilbur Lindqvist. Subject, study log and music additions
+by Artemio Ortiz.

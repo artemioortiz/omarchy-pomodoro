@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "techywilbur.pomodoro",
   "name": "Pomodoro",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "author": "Wilbur Lindqvist (techywilbur)",
   "license": "MIT",
   "description": "Pomodoro focus timer for the Omarchy bar: a countdown in the bar, a popup with transport controls, focus presets and break buttons, a full-screen break screen with a progress ring, Do Not Disturb while you focus, chimes, notifications and daily stats. Survives shell restarts and suspend.",
@@ -32,7 +32,11 @@
       "notify": true,
       "autoStartBreak": true,
       "autoStartFocus": false,
-      "staleAfter": 30
+      "staleAfter": 30,
+      "music": true,
+      "showSubject": true,
+      "todoistFilter": "today | overdue",
+      "studyLog": ""
     },
     "schema": [
       { "key": "focus", "type": "integer", "label": "Focus block (minutes)", "min": 1, "max": 180, "step": 5, "defaultValue": 25 },
@@ -45,7 +49,11 @@
       { "key": "notify", "type": "boolean", "label": "Desktop notification at the end of a block", "defaultValue": true },
       { "key": "autoStartBreak", "type": "boolean", "label": "Start the break automatically when focus ends", "defaultValue": true },
       { "key": "autoStartFocus", "type": "boolean", "label": "Start the next focus automatically when a break ends", "defaultValue": false, "description": "Off: wait for you to press Start (or Enter on the break screen)." },
-      { "key": "staleAfter", "type": "integer", "label": "Drop a restored timer if it ended more than N minutes ago", "min": 1, "max": 1440, "step": 5, "defaultValue": 30 }
+      { "key": "staleAfter", "type": "integer", "label": "Drop a restored timer if it ended more than N minutes ago", "min": 1, "max": 1440, "step": 5, "defaultValue": 30 },
+      { "key": "music", "type": "boolean", "label": "Pause music during breaks", "defaultValue": true, "description": "Pauses whatever is playing (Spotify, a browser tab, a podcast app) when a break starts and resumes only that when focus starts again." },
+      { "key": "showSubject", "type": "boolean", "label": "Show the subject in the bar", "defaultValue": true },
+      { "key": "todoistFilter", "type": "string", "label": "Todoist filter for the subject picker", "defaultValue": "today | overdue", "description": "Any Todoist filter, e.g. ##WGU | @study. Needs a token in ~/.config/uni-pomo/todoist-token." },
+      { "key": "studyLog", "type": "string", "label": "Study log file", "defaultValue": "", "description": "Markdown file each focus block is appended to, e.g. ~/Obsidian/Journal/Study log.md. Empty turns it off; the folder must exist." }
     ]
   }
 }

@@ -15,16 +15,26 @@
 #   uni-pomo long [min]          start a long break
 #   uni-pomo extend <min>        add (or subtract) minutes on the running block
 #   uni-pomo hide | show         hide / show the break screen
+#   uni-pomo subject             pick what you're working on (Todoist tasks,
+#                                recent subjects, or type a new one)
+#   uni-pomo subject <text>      set it directly; `uni-pomo subject clear` clears it
+#   uni-pomo done                mark the subject's Todoist task done
+#   uni-pomo report [today|week|all]
+#                                focused time per subject
 #   uni-pomo panel               toggle the bar popup
 #   uni-pomo get <key>           read a setting
 #   uni-pomo set <key> <value>   write a setting (focus, shortBreak, longBreak,
 #                                longEvery, dnd, overlay, sound, notify,
-#                                autoStartBreak, autoStartFocus, overlayDim, presets)
+#                                autoStartBreak, autoStartFocus, overlayDim, presets,
+#                                music, showSubject, todoistFilter, studyLog)
 #   uni-pomo settings            print all settings
 
 set -euo pipefail
 CFG="$HOME/.config/omarchy/shell.json"
 ID="techywilbur.pomodoro"
+# Helpers ship next to this script; a copy in ~/.local/bin uses the installed plugin.
+DIR=$(dirname "$(readlink -f "$0")")
+[[ -f $DIR/pomo-todoist ]] || DIR="$HOME/.config/omarchy/plugins/$ID"
 
 ipc() { omarchy-shell pomodoro "$@"; }
 
@@ -47,7 +57,11 @@ set_setting() {
   # numbers, booleans and JSON arrays pass through; anything else is a string
   if ! jq -e --argjson v "$val" 'true' >/dev/null 2>&1 <<<'null'; then val=$(jq -Rn --arg v "$val" '$v'); fi
   tmp=$(mktemp "$(dirname "$CFG")/.shell.json.XXXXXX")
-  jq --argjson p "$p" --arg k "$1" --argjson v "$val" 'setpath($p + [$k]; $v)' "$CFG" >"$tmp" && mv "$tmp" "$CFG"
+  jq --argjson p "$p" --arg k "$1" --argjson v "$val" 'setpath($p + [$k]; $v)' "$CFG" >"$tmp"
+  chmod --reference="$CFG" "$tmp" # mktemp's 600 would otherwise replace the config's mode
+  mv "$tmp" "$CFG"
+  # The shell's file watcher misses a rename over the file, so ask it to re-read.
+  omarchy-shell shell reloadConfig >/dev/null 2>&1 || true
   echo "$1 = $val"
 }
 
@@ -57,7 +71,47 @@ human() {
     def mins: (.todayMinutes|tostring) + " min";
     if .phase == "idle" then "Pomodoro idle · today " + (.todayCount|tostring) + " sessions, " + mins
     elif .phase == "ready" then .label + " — waiting to start " + .readyNext
-    else .label + (if .paused then " (paused)" else "" end) + " · " + .remaining + " left · " + (.cyclesDone|tostring) + "/" + (.longEvery|tostring) + " this set" end' <<<"$json"
+    else .label + (if .paused then " (paused)" else "" end) + " · " + .remaining + " left · " + (.cyclesDone|tostring) + "/" + (.longEvery|tostring) + " this set" end
+    + (if (.subject // "") != "" then " · " + .subject else "" end)' <<<"$json"
+}
+
+# Todoist tasks, recent subjects and "New subject…" in the Omarchy menu.
+# The menu returns an option minus its glyph ("<label><TAB><subtext>" when
+# there is a subtext), which maps the pick back to its row and task id.
+pick_subject() {
+  local filter status todo sel id label detail
+  local -a options=($'󰏫\tNew subject…') ids=("") labels=("")
+
+  filter=$(get_setting todoistFilter 2>/dev/null || true)
+  todo=$(python3 "$DIR/pomo-todoist" list "${filter:-today | overdue}" 2>/dev/null) || todo='{"ok":false,"error":"pomo-todoist failed"}'
+  status=$(ipc status 2>/dev/null) || status='{}'
+
+  while IFS=$'\t' read -r id label detail; do
+    [[ -n $label ]] || continue
+    options+=($'󰄱\t'"$label"$'\t'"${detail:-Todoist}"); ids+=("$id"); labels+=("$label")
+  done < <(jq -r '.tasks[]? | "\(.id)\t\(.content)\t\(.detail)"' <<<"$todo") # pomo-todoist strips tabs/newlines
+
+  while IFS= read -r label; do
+    [[ -n $label ]] || continue
+    options+=($'󰋚\t'"$label"$'\tRecent'); ids+=(""); labels+=("$label")
+  done < <(jq -r '.recentSubjects[]?' <<<"$status")
+
+  if [[ $(jq -r '.ok' <<<"$todo") != true ]]; then
+    detail=$(jq -r '.error // "unknown error"' <<<"$todo")
+    options+=($'󰀦\tTodoist unavailable\t'"$detail"); ids+=(""); labels+=("")
+  fi
+
+  sel=$(omarchy-menu-select "Working on" "${options[@]}" -- --width 640) || return 0
+  for i in "${!options[@]}"; do
+    [[ ${options[i]#*$'\t'} == "$sel" ]] || continue
+    if (( i == 0 )); then
+      label=$(omarchy-menu-input "Working on" --width 640) || return 0
+      [[ -n ${label//[[:space:]]/} ]] && human "$(ipc setSubject "$label" "")"
+    elif [[ -n ${labels[i]} ]]; then
+      human "$(ipc setSubject "${labels[i]}" "${ids[i]}")"
+    fi
+    return 0
+  done
 }
 
 case "${1:-status}" in
@@ -72,9 +126,17 @@ extend) [[ -n ${2:-} ]] || { echo "usage: uni-pomo extend <minutes>" >&2; exit 1
 hide) ipc hideBreak >/dev/null ;;
 show) ipc showBreak >/dev/null ;;
 panel) omarchy-shell shell toggle "$ID" ;;
+subject)
+  case "${2:-}" in
+  "") pick_subject ;;
+  clear|-) human "$(ipc clearSubject)" ;;
+  *) shift; human "$(ipc setSubject "$*" "")" ;;
+  esac ;;
+done) human "$(ipc todoistDone)" ;;
+report) python3 "$DIR/pomo-history" report "${2:-today}" ;;
 get) get_setting "${2:?key}" ;;
 set) set_setting "${2:?key}" "${3:?value}" ;;
 settings) p=$(entry_path); [[ -n $p ]] && jq --argjson p "$p" 'getpath($p)' "$CFG" ;;
--h|--help|help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//' ;;
+-h|--help|help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
 *) echo "unknown command: $1 (try uni-pomo help)" >&2; exit 1 ;;
 esac

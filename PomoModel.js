@@ -18,8 +18,15 @@ var DEFAULTS = {
   presets: [15, 25, 50, 90],
   soundFocusEnd: "/usr/share/sounds/freedesktop/stereo/complete.oga",
   soundBreakEnd: "/usr/share/sounds/freedesktop/stereo/message.oga",
-  staleAfter: 30        // minutes past the end after which a restored timer is dropped
+  staleAfter: 30,       // minutes past the end after which a restored timer is dropped
+  music: true,          // pause what's playing on a break, resume it when focus starts again
+  showSubject: true,    // show the subject next to the countdown in the bar
+  todoistFilter: "today | overdue", // Todoist filter for the subject picker
+  studyLog: ""          // markdown file each focus block is appended to; empty = off
 }
+
+var SUBJECT_MAX = 120
+var RECENT_MAX = 8
 
 var BREAK_TIPS = [
   "Stand up. Roll your shoulders.",
@@ -31,27 +38,6 @@ var BREAK_TIPS = [
   "Stretch the hands that just did the work.",
   "Walk to a window."
 ]
-
-function findEntry(shellConfig, id) {
-  if (!shellConfig) return null
-  var layout = shellConfig.bar && shellConfig.bar.layout
-  if (layout) {
-    for (var section in layout) {
-      var list = layout[section]
-      if (!Array.isArray(list)) continue
-      for (var i = 0; i < list.length; i++) {
-        if (list[i] && list[i].id === id) return list[i]
-      }
-    }
-  }
-  var plugins = shellConfig.plugins
-  if (Array.isArray(plugins)) {
-    for (var j = 0; j < plugins.length; j++) {
-      if (plugins[j] && plugins[j].id === id) return plugins[j]
-    }
-  }
-  return null
-}
 
 function num(value, fallback, min, max) {
   var n = Number(value)
@@ -85,7 +71,11 @@ function config(entry) {
     presets: presets.length ? presets : DEFAULTS.presets.slice(),
     soundFocusEnd: e.soundFocusEnd ? String(e.soundFocusEnd) : DEFAULTS.soundFocusEnd,
     soundBreakEnd: e.soundBreakEnd ? String(e.soundBreakEnd) : DEFAULTS.soundBreakEnd,
-    staleAfter: num(e.staleAfter, DEFAULTS.staleAfter, 1, 24 * 60)
+    staleAfter: num(e.staleAfter, DEFAULTS.staleAfter, 1, 24 * 60),
+    music: bool(e.music, DEFAULTS.music),
+    showSubject: bool(e.showSubject, DEFAULTS.showSubject),
+    todoistFilter: e.todoistFilter ? String(e.todoistFilter) : DEFAULTS.todoistFilter,
+    studyLog: e.studyLog ? String(e.studyLog) : DEFAULTS.studyLog
   }
 }
 
@@ -165,4 +155,95 @@ function sessionDots(cyclesDone, longEvery, phase) {
     dots.push(state)
   }
   return dots
+}
+
+// ---- subject
+
+// One line, no control characters, capped. Anything that would break the
+// bar, the log line or the state file is flattened to a space.
+function cleanSubject(text) {
+  var s = String(text === undefined || text === null ? "" : text)
+  s = s.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim()
+  return s.length > SUBJECT_MAX ? s.slice(0, SUBJECT_MAX).trim() : s
+}
+
+function cleanTaskId(id) {
+  var s = String(id === undefined || id === null ? "" : id)
+  return /^[A-Za-z0-9_-]{1,64}$/.test(s) ? s : ""
+}
+
+// Most recent first, no duplicates (case-insensitive), at most RECENT_MAX.
+function addRecent(list, subject) {
+  var s = cleanSubject(subject)
+  var out = s ? [s] : []
+  var src = Array.isArray(list) ? list : []
+  for (var i = 0; i < src.length && out.length < RECENT_MAX; i++) {
+    var r = cleanSubject(src[i])
+    if (!r) continue
+    var dup = false
+    for (var j = 0; j < out.length; j++) if (out[j].toLowerCase() === r.toLowerCase()) dup = true
+    if (!dup) out.push(r)
+  }
+  return out
+}
+
+function shorten(text, max) {
+  var s = String(text || "")
+  return s.length > max ? s.slice(0, Math.max(1, max - 1)).trim() + "…" : s
+}
+
+// ---- history
+
+// One focus block as it goes to history.jsonl and the study log.
+// focusedMs excludes paused time; outcome is done | skipped | stopped.
+function focusEntry(startedAt, endedAt, focusedMs, plannedMs, outcome, subject, taskId, track) {
+  return {
+    start: Math.round(startedAt),
+    end: Math.round(endedAt),
+    minutes: Math.round(Math.max(0, focusedMs) / 60000),
+    planned: Math.round(Math.max(0, plannedMs) / 60000),
+    outcome: outcome === "skipped" || outcome === "stopped" ? outcome : "done",
+    subject: cleanSubject(subject),
+    taskId: cleanTaskId(taskId),
+    track: shorten(cleanSubject(track), 200)
+  }
+}
+
+// ---- music (MPRIS)
+
+function isProxyPlayer(player) {
+  var dbusName = String(player && player.dbusName || "").toLowerCase()
+  var desktopEntry = String(player && player.desktopEntry || "").toLowerCase()
+  return dbusName.indexOf("playerctld") !== -1 || desktopEntry === "playerctld"
+}
+
+// Players that are playing right now and can be paused. playerctld is a
+// proxy for the others, so pausing it too would act twice.
+function playersToPause(players) {
+  var out = []
+  var src = players || []
+  for (var i = 0; i < src.length; i++) {
+    var p = src[i]
+    if (!p || isProxyPlayer(p) || !p.isPlaying || !p.dbusName) continue
+    if (p.canPause || p.canTogglePlaying) out.push(p)
+  }
+  return out
+}
+
+function firstPlaying(players) {
+  var src = players || []
+  for (var i = 0; i < src.length; i++) {
+    var p = src[i]
+    if (p && !isProxyPlayer(p) && p.isPlaying) return p
+  }
+  return null
+}
+
+// "Title — Artist", falling back to the app name (a browser tab, Spotify, ...).
+function trackLabel(player) {
+  if (!player) return ""
+  var title = cleanSubject(player.trackTitle)
+  var artist = cleanSubject(player.trackArtist)
+  var label = title && artist ? title + " — " + artist : title || cleanSubject(player.identity || player.desktopEntry)
+  return shorten(label, 200)
 }
