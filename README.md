@@ -15,8 +15,8 @@ This fork adds three things for studying:
   Todoist tasks or typed in. It shows in the bar and on the break screen, and
   a Todoist task can be marked done from the popup or the break screen.
 - **Study log:** every focus block that lasted at least a minute is recorded
-  with the minutes actually focused and the subject.
-  Optionally it is also appended to a markdown file such as an Obsidian note.
+  with the minutes actually focused and the subject, and so is every
+  Todoist task marked done from the plugin. Optionally it is also appended to a markdown file such as an Obsidian note.
   `uni-pomo report week` totals the time per subject.
 - **Music:** whatever is playing over MPRIS (YouTube Music or Pandora in a
   browser, Spotify, a podcast or audiobook app) is paused when a break starts
@@ -65,10 +65,16 @@ day:
 ```markdown
 ## 2026-10-27 Tue
 - 14:05–14:30 · 25 min · [D340 ch.4 reading](https://app.todoist.com/app/task/…)
+- 14:31 · ✓ Done · [D340 ch.4 reading](https://app.todoist.com/app/task/…)
 - 14:35–14:47 · 12 min (stopped) · D340 ch.4 reading
 ```
 
-`uni-pomo report [today|week|all]` prints the totals per subject.
+A `✓ Done` line is written when a Todoist task is marked done from the popup
+or the break screen, whenever that happens (during focus, on the break or
+later), and it goes to `history.jsonl` too.
+
+`uni-pomo report [today|week|all]` prints the totals per subject and the tasks
+marked done.
 
 ## The popup
 

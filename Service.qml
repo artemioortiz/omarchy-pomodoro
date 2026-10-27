@@ -21,8 +21,9 @@ import "PomoModel.js" as Pomo
 //
 // Each focus block that ends (done, skipped or stopped, at least a minute) is
 // appended by `pomo-history` to ~/.local/state/uni-pomo/history.jsonl and,
-// when `studyLog` is set, to that markdown file. Music playing over MPRIS is
-// paused when a break starts and only what we paused is resumed on focus.
+// when `studyLog` is set, to that markdown file, as is each Todoist task
+// marked done from here. Music playing over MPRIS is paused when a break
+// starts and only what we paused is resumed on focus.
 //
 // IPC: `omarchy-shell pomodoro <status|start|pause|resume|toggle|stop|skip|
 //        focus <min>|shortBreak <min>|longBreak <min>|extend <min>|hideBreak|showBreak|
@@ -305,6 +306,7 @@ Item {
             root.subjectDone = true
             root.persist()
           }
+          root.recordDone(Pomo.doneEntry(root.now(), todoistCloser.label, todoistCloser.taskId))
           root.notify("Done in Todoist", todoistCloser.label, "󰄬")
         } else {
           root.notify("Todoist", String(r.error || "could not close the task"), "󰀦")
@@ -315,9 +317,12 @@ Item {
 
   // ------------------------------------------------------------------ history
 
-  function recordFocus(entry) {
+  function recordFocus(entry) { writeHistory("append", entry) }
+  function recordDone(entry) { if (entry.taskId) writeHistory("done", entry) }
+
+  function writeHistory(verb, entry) {
     if (!historyPath) return
-    var cmd = ["python3", historyPath, "append", JSON.stringify(entry)]
+    var cmd = ["python3", historyPath, verb, JSON.stringify(entry)]
     if (config.studyLog) cmd.push("--log", config.studyLog)
     historyWriter.queue.push(cmd)
     historyWriter.next()
