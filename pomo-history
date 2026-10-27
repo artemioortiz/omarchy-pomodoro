@@ -9,7 +9,7 @@ of truth) and, with --log, one line under today's heading in a markdown
 study log such as an Obsidian note:
 
     ## 2026-10-27 Tue
-    - 14:05–14:30 · 25 min · D340 ch.4 reading · ♪ Lofi — Girl
+    - 14:05–14:30 · 25 min · D340 ch.4 reading
 
 The entry comes from Service.qml (PomoModel.focusEntry) and is re-validated
 here. The log's parent folder must already exist, so a typo in the path
@@ -77,7 +77,6 @@ def validate(raw):
         "outcome": data.get("outcome") if data.get("outcome") in ("done", "skipped", "stopped") else "done",
         "subject": clean(data.get("subject"), 120),
         "taskId": task_id if TASK_ID_RE.match(task_id) else "",
-        "track": clean(data.get("track"), 200),
     }
 
 
@@ -110,10 +109,7 @@ def log_line(entry):
     subject = md_text(entry["subject"]) if entry["subject"] else "No subject"
     if entry["taskId"]:
         subject = "[%s](%s%s)" % (subject, TASK_URL, entry["taskId"])
-    parts = [when, mins, subject]
-    if entry["track"]:
-        parts.append("♪ " + md_text(entry["track"]))
-    return "- " + " · ".join(parts) + "\n"
+    return "- " + " · ".join([when, mins, subject]) + "\n"
 
 
 def append_log(path, entry):

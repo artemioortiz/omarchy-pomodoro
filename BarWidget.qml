@@ -34,7 +34,6 @@ BarWidget {
   readonly property string subject: ready ? pomo.subject : ""
   readonly property bool subjectDone: ready ? pomo.subjectDone : false
   readonly property bool hasTask: ready && pomo.subjectTaskId !== "" && !pomo.subjectDone
-  readonly property string nowPlaying: ready ? pomo.nowPlaying : ""
 
   readonly property color accent: Color.accent
   readonly property color fg: bar ? bar.foreground : Color.foreground
@@ -393,7 +392,6 @@ BarWidget {
       Toggle {
         width: parent.width
         label: "Pause music during breaks"
-        description: root.nowPlaying ? "♪ " + root.nowPlaying : ""
         checked: root.cfg.music
         foreground: root.fg
         accent: root.accent
