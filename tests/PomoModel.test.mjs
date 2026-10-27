@@ -46,12 +46,12 @@ test("shorten adds an ellipsis only when needed", () => {
 })
 
 test("focusEntry rounds minutes and normalizes fields", () => {
-  const e = Pomo.focusEntry(1000, 2000, 12.6 * 60000, 25 * 60000, "skipped", " D340 ", "bad id!", "Song — Artist")
+  const e = Pomo.focusEntry(1000, 2000, 12.6 * 60000, 25 * 60000, "skipped", " D340 ", "bad id!")
   assert.deepEqual(e, {
     start: 1000, end: 2000, minutes: 13, planned: 25, outcome: "skipped",
-    subject: "D340", taskId: "", track: "Song — Artist"
+    subject: "D340", taskId: ""
   })
-  assert.equal(Pomo.focusEntry(0, 0, 0, 0, "weird", "", "", "").outcome, "done")
+  assert.equal(Pomo.focusEntry(0, 0, 0, 0, "weird", "", "").outcome, "done")
 })
 
 test("playersToPause skips proxies, idle and uncontrollable players", () => {
@@ -66,21 +66,4 @@ test("playersToPause skips proxies, idle and uncontrollable players", () => {
     "org.mpris.MediaPlayer2.chromium.instance42",
     "org.mpris.MediaPlayer2.pandora"
   ])
-})
-
-test("trackLabel prefers title and artist, then the app", () => {
-  assert.equal(Pomo.trackLabel({ trackTitle: "Lofi", trackArtist: "Girl" }), "Lofi — Girl")
-  assert.equal(Pomo.trackLabel({ trackTitle: "Audio Overview" }), "Audio Overview")
-  assert.equal(Pomo.trackLabel({ identity: "Brave" }), "Brave")
-  assert.equal(Pomo.trackLabel(null), "")
-  // pomo-state-read accepts at most 200 characters
-  assert.equal(Pomo.trackLabel({ trackTitle: "t".repeat(120), trackArtist: "a".repeat(120) }).length, 200)
-})
-
-test("firstPlaying ignores the playerctld proxy", () => {
-  const p = Pomo.firstPlaying([
-    { dbusName: "org.mpris.MediaPlayer2.playerctld", isPlaying: true },
-    { dbusName: "org.mpris.MediaPlayer2.spotify", isPlaying: true }
-  ])
-  assert.equal(p.dbusName, "org.mpris.MediaPlayer2.spotify")
 })

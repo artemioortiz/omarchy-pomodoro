@@ -158,7 +158,6 @@ def sanitize(raw):
         "subjectDone": as_bool(data.get("subjectDone")),
         "recentSubjects": as_list(data.get("recentSubjects"), lambda x: as_text(x, 120), 8),
         "focusStartedAt": as_int(data.get("focusStartedAt"), 0, EPOCH_MS_MAX),
-        "focusTrack": as_text(data.get("focusTrack"), 200),
         "pausedPlayers": as_list(data.get("pausedPlayers"), lambda x: as_match(x, PLAYER_RE), 16),
     }
     out = {"version": 1}

@@ -196,7 +196,7 @@ function shorten(text, max) {
 
 // One focus block as it goes to history.jsonl and the study log.
 // focusedMs excludes paused time; outcome is done | skipped | stopped.
-function focusEntry(startedAt, endedAt, focusedMs, plannedMs, outcome, subject, taskId, track) {
+function focusEntry(startedAt, endedAt, focusedMs, plannedMs, outcome, subject, taskId) {
   return {
     start: Math.round(startedAt),
     end: Math.round(endedAt),
@@ -204,8 +204,7 @@ function focusEntry(startedAt, endedAt, focusedMs, plannedMs, outcome, subject, 
     planned: Math.round(Math.max(0, plannedMs) / 60000),
     outcome: outcome === "skipped" || outcome === "stopped" ? outcome : "done",
     subject: cleanSubject(subject),
-    taskId: cleanTaskId(taskId),
-    track: shorten(cleanSubject(track), 200)
+    taskId: cleanTaskId(taskId)
   }
 }
 
@@ -228,22 +227,4 @@ function playersToPause(players) {
     if (p.canPause || p.canTogglePlaying) out.push(p)
   }
   return out
-}
-
-function firstPlaying(players) {
-  var src = players || []
-  for (var i = 0; i < src.length; i++) {
-    var p = src[i]
-    if (p && !isProxyPlayer(p) && p.isPlaying) return p
-  }
-  return null
-}
-
-// "Title — Artist", falling back to the app name (a browser tab, Spotify, ...).
-function trackLabel(player) {
-  if (!player) return ""
-  var title = cleanSubject(player.trackTitle)
-  var artist = cleanSubject(player.trackArtist)
-  var label = title && artist ? title + " — " + artist : title || cleanSubject(player.identity || player.desktopEntry)
-  return shorten(label, 200)
 }

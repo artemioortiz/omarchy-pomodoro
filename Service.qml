@@ -73,7 +73,6 @@ Item {
   property bool subjectDone: false     // that task was marked done from here
   property var recentSubjects: []
   property real focusStartedAt: 0      // epoch ms; non-zero while a focus block is open
-  property string focusTrack: ""       // last thing heard during the open focus block
   property var pausedPlayers: []       // MPRIS bus names we paused for a break
 
   readonly property bool active: phase === "focus" || Pomo.isBreak(phase)
@@ -89,7 +88,6 @@ Item {
   readonly property bool dndWanted: config.dnd && phase === "focus" && running
   readonly property bool overlayVisible: hydrated && config.overlay && !overlayDismissed && (isBreak || phase === "ready")
   readonly property var players: Mpris.players ? Mpris.players.values : []
-  readonly property string nowPlaying: Pomo.trackLabel(Pomo.firstPlaying(players))
 
   // ------------------------------------------------------------------ engine
 
@@ -110,7 +108,6 @@ Item {
     if (nextPhase === "focus") {
       endFocus("stopped")             // a preset clicked mid-focus restarts the block
       focusStartedAt = now()
-      focusTrack = nowPlaying
       resumeMusic()
     } else {
       endFocus("skipped")
@@ -262,9 +259,8 @@ Item {
     var left = running ? Math.max(0, endsAt - now()) : remainingMs
     var focusedMs = outcome === "done" ? plannedMs : Math.max(0, plannedMs - left)
     var entry = Pomo.focusEntry(focusStartedAt, now(), focusedMs, plannedMs, outcome,
-                                subject, subjectDone ? "" : subjectTaskId, focusTrack || nowPlaying)
+                                subject, subjectDone ? "" : subjectTaskId)
     focusStartedAt = 0
-    focusTrack = ""
     if (entry.minutes < 1) return
     rollDay()
     if (outcome === "done") todayCount += 1
@@ -372,8 +368,6 @@ Item {
     }
   }
 
-  onNowPlayingChanged: if (phase === "focus" && running && nowPlaying) focusTrack = nowPlaying
-
   // ------------------------------------------------------------------ effects
 
   onDndWantedChanged: { dndTries = 0; syncDnd() }
@@ -441,7 +435,7 @@ Item {
       todayCount: todayCount, todayMinutes: todayMinutes,
       dnd: dndApplied, breakScreen: overlayVisible,
       subject: subject, subjectTaskId: subjectTaskId, subjectDone: subjectDone,
-      recentSubjects: recentSubjects, nowPlaying: nowPlaying, musicPaused: pausedPlayers.length,
+      recentSubjects: recentSubjects, musicPaused: pausedPlayers.length,
       config: config
     })
   }
@@ -454,7 +448,7 @@ Item {
       cyclesDone: cyclesDone, day: day, todayCount: todayCount, todayMinutes: todayMinutes,
       dndBefore: dndBefore, dndApplied: dndApplied, tipIndex: tipIndex,
       subject: subject, subjectTaskId: subjectTaskId, subjectDone: subjectDone,
-      recentSubjects: recentSubjects, focusStartedAt: focusStartedAt, focusTrack: focusTrack,
+      recentSubjects: recentSubjects, focusStartedAt: focusStartedAt,
       pausedPlayers: pausedPlayers
     }, null, 2) + "\n")
   }
@@ -509,7 +503,6 @@ Item {
       }
       if (phase === "focus") {
         focusStartedAt = Number(s.focusStartedAt || 0) || now() - Math.max(0, plannedMs - remainingMs)
-        focusTrack = Pomo.cleanSubject(s.focusTrack)
       }
     } else if (p === "ready") {
       phase = "ready"
